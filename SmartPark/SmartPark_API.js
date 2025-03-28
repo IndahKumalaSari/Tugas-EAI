@@ -1,84 +1,71 @@
 const express = require('express');
-const { Client } = require('pg');
+const { Pool } = require('pg');
 const mqtt = require('mqtt');
-
 require('dotenv').config();
 
 const app = express();
-const PORT = 3000;
+const port = 3000;
+app.use(express.json());
 
-// Konfigurasi koneksi ke PostgreSQL
-const db = new Client({
+// Database connection
+const pool = new Pool({
     user: process.env.DB_USER,
-    host: 'localhost',
+    host: process.env.DB_HOST,
     database: process.env.DB_NAME,
     password: process.env.DB_PASS,
-    port: 5432,
+    port: process.env.DB_PORT,
 });
 
-db.connect()
-    .then(() => console.log('✅ Connected to PostgreSQL'))
-    .catch(err => console.error('❌ Connection error', err));
-
-// Endpoint test
-app.get('/', (req, res) => {
-    res.send('🚀 SmartPark API is running!');
-});
-
-// Menjalankan server
-app.listen(PORT, () => {
-    console.log(`✅ Server running at http://localhost:${PORT}`);
-});
-
-// Konfigurasi MQTT
-const mqttClient = mqtt.connect('mqtt://broker.hivemq.com');
-const topic = 'smartpark/data';
+// MQTT Client Setup
+const mqttClient = mqtt.connect(process.env.MQTT_BROKER);
 
 mqttClient.on('connect', () => {
-  console.log('Connected to MQTT broker');
-  mqttClient.subscribe(topic);
+    console.log('Connected to MQTT broker');
+    mqttClient.subscribe('smartpark/parking-status');
 });
 
 mqttClient.on('message', async (topic, message) => {
-  const data = JSON.parse(message.toString());
-  const { slot_id, distance, status } = data;
-  
-  if (!slot_id || distance === undefined || !status) {
-    console.error('Invalid sensor data received');
-    return;
-  }
+    const data = JSON.parse(message.toString());
+    const { parking_lot_id, distance } = data;
+    const status = distance < 20 ? 'full' : 'available';
 
-  try {
-    await db.query(
-      'INSERT INTO parking_slots (slot_id, distance, status, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (slot_id) DO UPDATE SET distance = $2, status = $3, updated_at = NOW()',
-      [slot_id, distance, status]
+    await pool.query(
+        'UPDATE parking_lots SET status = $1, updated_at = NOW() WHERE id = $2',
+        [status, parking_lot_id]
     );
-    console.log('Data updated successfully');
-  } catch (err) {
-    console.error('Database error:', err);
-  }
+    console.log(`Updated parking lot ${parking_lot_id} to status: ${status}`);
 });
 
-// API untuk mendapatkan status parkir
+// API Endpoints
 app.get('/parking-status', async (req, res) => {
-    try {
-      const { slot_id } = req.query;
-      let result;
-  
-      if (slot_id) {
-        result = await db.query('SELECT * FROM parking_slots WHERE slot_id = $1', [slot_id]);
-      } else {
-        result = await db.query('SELECT * FROM parking_slots');
-      }
-  
-      if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'No parking data found' });
-      }
-  
-      res.json(result.rows);
-    } catch (err) {
-      console.error('Database error:', err);  // Tambahkan logging ini
-      res.status(500).json({ error: 'Internal Server Error', details: err.message });
-    }
-  });
-  
+    const result = await pool.query('SELECT * FROM parking_lots');
+    res.json(result.rows);
+});
+
+app.post('/add-parking', async (req, res) => {
+    const { parking_lot_id, status } = req.body;
+    await pool.query(
+        'INSERT INTO parking_lots (id, status, updated_at) VALUES ($1, $2, NOW())',
+        [parking_lot_id, status]
+    );
+    res.json({ message: 'Data parkir berhasil ditambahkan', parking_lot_id });
+});
+
+app.put('/update-parking', async (req, res) => {
+    const { parking_lot_id, status } = req.body;
+    await pool.query(
+        'UPDATE parking_lots SET status = $1, updated_at = NOW() WHERE id = $2',
+        [status, parking_lot_id]
+    );
+    res.json({ message: 'Data parkir berhasil diperbarui', parking_lot_id });
+});
+
+app.delete('/delete-parking', async (req, res) => {
+    const { parking_lot_id } = req.body;
+    await pool.query('DELETE FROM parking_lots WHERE id = $1', [parking_lot_id]);
+    res.json({ message: 'Data parkir berhasil dihapus', parking_lot_id });
+});
+
+app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+});
